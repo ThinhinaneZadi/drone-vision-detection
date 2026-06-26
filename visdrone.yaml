@@ -1,0 +1,32 @@
+# Dataset configuration file for YOLO training on VisDrone.
+# This file tells YOLO where the images are and what the class names mean.
+
+# Main dataset folder.
+path: data/VisDrone-DET
+
+# Training images.
+train: VisDrone2019-DET-train/images
+
+# Validation images.
+val: VisDrone2019-DET-val/images
+
+# Number of object classes used for training.
+# We use 10 classes because we skip:
+# 0 = ignored region
+# 11 = others
+nc: 10
+
+# Class names.
+# YOLO class IDs start at 0.
+# These correspond to VisDrone categories 1 to 10.
+names:
+  0: pedestrian
+  1: people
+  2: bicycle
+  3: car
+  4: van
+  5: truck
+  6: tricycle
+  7: awning-tricycle
+  8: bus
+  9: motor

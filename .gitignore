@@ -1,0 +1,20 @@
+# Dataset files should not be pushed to GitHub
+data/
+
+# YOLO training outputs can be large
+runs/
+
+# Prediction images and videos can be large
+results/images/
+results/videos/
+
+# Model weight files are usually large
+*.pt
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# Environment and system files
+.env
+.DS_Store
