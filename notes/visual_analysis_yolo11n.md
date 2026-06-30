@@ -74,3 +74,11 @@ After testing different confidence thresholds, I observed that all thresholds st
 The lower threshold showed more detections, but the output became more cluttered. The higher threshold looked cleaner, but it missed even more small objects.
 
 This means the main problem is not only the confidence threshold. The model needs stronger training or improved settings to detect small drone-view objects better.
+
+## Continued Model and IoU Test
+
+After continuing training for 30 more epochs, the model detected more pedestrians compared to the earlier 20-epoch baseline. However, some detections became overlapping and visually cluttered.
+
+I tested a lower IoU threshold of 0.40 during prediction. This helped reduce overlapping boxes and made the output cleaner.
+
+Even with the cleaner IoU setting, the model still missed some people, especially small or distant pedestrians. This shows that longer training and NMS tuning can improve results, but small-object detection remains a challenge in drone-view images.

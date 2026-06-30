@@ -70,3 +70,34 @@ Overall, the 20-epoch model is a stronger baseline because it detects more objec
 ## Main Observation
 
 Cars are the strongest class so far. Smaller objects such as bicycles, tricycles, awning-tricycles, and some pedestrians remain difficult because VisDrone contains many small, crowded, and partially occluded objects.
+
+## Experiment 3: YOLO11n Continued Training
+
+This experiment continued training from the 20-epoch YOLO11n baseline for 30 additional epochs.
+
+Settings:
+
+- Starting model: YOLO11n 20-epoch baseline best.pt
+- Additional epochs: 30
+- Approximate total training: 50 epochs
+- Image size: 416
+- Batch size: 1
+- Device: NVIDIA GTX 1650 GPU
+
+Results:
+
+- Precision: 0.286
+- Recall: 0.194
+- mAP50: 0.154
+- mAP50-95: 0.0808
+
+Comparison:
+
+- 20-epoch baseline mAP50: 0.125
+- Continued model mAP50: 0.154
+- 20-epoch baseline mAP50-95: 0.0653
+- Continued model mAP50-95: 0.0808
+
+Main takeaway:
+
+Continuing training improved the model overall, especially in recall and mAP. However, visual testing still showed missed small objects and some overlapping detections, so small-object detection remains the main challenge.
