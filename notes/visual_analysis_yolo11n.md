@@ -90,3 +90,27 @@ I created a short test video from 100 VisDrone validation images using FFmpeg. T
 The YOLO11n continued model successfully processed the test video and generated an output video with detection boxes.
 
 This confirms that the video inference pipeline works. The next step is to test the model on real VisDrone video data or another actual drone video sequence.
+
+## Real VisDrone Video Sequence Test
+
+I tested the continued YOLO11n model on a real VisDrone video sequence from the VisDrone2019-VID test-dev split.
+
+The selected sequence was:
+
+uav0000297_00000_v
+
+The sequence contained 146 frames. I converted the image sequence into a short MP4 video using FFmpeg, then ran YOLO inference on the video.
+
+The model successfully generated an output video with detection boxes. Visual inspection showed that the model can run on real VisDrone video data and produce useful detections.
+
+This confirms that the project pipeline now supports both image inference and real video-sequence inference.
+
+## External Drone Video Test
+
+I also tested the continued YOLO11n model on an external drone video showing a road/bridge scene with cars, pedestrians, and motors.
+
+The model successfully processed the external video and detected several relevant classes, including cars, pedestrians, and motors.
+
+The result shows that the VisDrone-trained model can generalize to an outside drone-style video. However, the output still became cluttered in crowded areas, and some small objects were missed or confused.
+
+This suggests that the model is useful for general drone-view detection, but further training and tuning are still needed for cleaner and more reliable results.
