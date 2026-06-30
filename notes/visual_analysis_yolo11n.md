@@ -38,3 +38,39 @@ Possible next steps:
 - Train for more epochs
 - Try a larger image size if GPU memory allows
 - Compare with another YOLO model size later
+
+## Confidence Threshold Test
+
+I tested the 20-epoch YOLO11n model on one validation image using a lower confidence threshold.
+
+Original prediction threshold:
+
+- conf = 0.25
+
+Lower threshold test:
+
+- conf = 0.15
+
+With the lower threshold, the model detected more pedestrians in the image. This shows that the model is sometimes detecting small pedestrians, but with low confidence.
+
+The tradeoff is that lower confidence may increase the number of detections, but some detections may be less reliable.
+
+This suggests that the model needs more training or improved settings to become more confident on small objects.
+
+## Crowded Scene Confidence Test
+
+I also tested a crowded traffic image using a lower confidence threshold of 0.15.
+
+The model detected many more cars, along with a few pedestrians and one motor. However, the visual result became very cluttered because many labels overlapped in the dense traffic area.
+
+This shows that lowering the confidence threshold can increase detections, but it does not always make the output better. In crowded scenes, it may make predictions harder to read and less clean.
+
+Overall, lower confidence is useful for analysis, but the default threshold may be cleaner for presentation.
+
+## Confidence Threshold Conclusion
+
+After testing different confidence thresholds, I observed that all thresholds still missed objects, especially small pedestrians, motors, and objects in crowded scenes.
+
+The lower threshold showed more detections, but the output became more cluttered. The higher threshold looked cleaner, but it missed even more small objects.
+
+This means the main problem is not only the confidence threshold. The model needs stronger training or improved settings to detect small drone-view objects better.
