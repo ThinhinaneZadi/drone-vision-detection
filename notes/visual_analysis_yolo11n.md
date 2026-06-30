@@ -82,3 +82,11 @@ After continuing training for 30 more epochs, the model detected more pedestrian
 I tested a lower IoU threshold of 0.40 during prediction. This helped reduce overlapping boxes and made the output cleaner.
 
 Even with the cleaner IoU setting, the model still missed some people, especially small or distant pedestrians. This shows that longer training and NMS tuning can improve results, but small-object detection remains a challenge in drone-view images.
+
+## Video Pipeline Test
+
+I created a short test video from 100 VisDrone validation images using FFmpeg. This was not a real drone video sequence, but an image-sequence video used to verify that the trained YOLO model can run inference on video input.
+
+The YOLO11n continued model successfully processed the test video and generated an output video with detection boxes.
+
+This confirms that the video inference pipeline works. The next step is to test the model on real VisDrone video data or another actual drone video sequence.
