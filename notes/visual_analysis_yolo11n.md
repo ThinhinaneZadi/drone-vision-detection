@@ -114,3 +114,13 @@ The model successfully processed the external video and detected several relevan
 The result shows that the VisDrone-trained model can generalize to an outside drone-style video. However, the output still became cluttered in crowded areas, and some small objects were missed or confused.
 
 This suggests that the model is useful for general drone-view detection, but further training and tuning are still needed for cleaner and more reliable results.
+
+## Batch Size Choice
+
+For training, I used a batch size of 1.
+
+Batch size means how many images the model processes before updating its weights. A larger batch size can sometimes make training more stable, but it also uses more GPU memory.
+
+I used batch=1 because my laptop GPU is an NVIDIA GTX 1650 with about 4GB of VRAM. Since VisDrone images are large and drone-view object detection can be memory intensive, using a larger batch size could cause CUDA out-of-memory errors.
+
+Using batch=1 allowed training to run safely and made it possible to test larger image sizes, such as imgsz=512, without exceeding the GPU memory limit.
