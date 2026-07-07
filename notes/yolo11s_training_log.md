@@ -54,3 +54,34 @@ Comparison:
 
 Interpretation:
 The frozen-head model is lower than the full fine-tuning model after 20 epochs. This suggests that only retraining the Detect head may not be enough for VisDrone, and earlier feature layers may need some adaptation to drone-view imagery. The immediate next step is to continue frozen-head training for more epochs and check whether the validation metrics continue improving or plateau.
+
+## YOLO11s Frozen-Head Batch Size Test
+
+Experiment:
+- Model: YOLO11s
+- Training type: Frozen-head transfer learning
+- Frozen layers: 0–22
+- Trainable layer: 23 Detect head
+- Freeze setting: freeze=23
+- Image size: 512
+- Batch size: 2
+- Learning rate: lr0=0.005
+- Epochs: 20
+- Validation images: 548
+- Validation instances: 38,759
+
+Validation result:
+- Precision: 0.279
+- Recall: 0.210
+- mAP50: 0.162
+- mAP50-95: 0.0881
+
+Class observation:
+- Car remained the strongest class:
+  - Precision: 0.432
+  - Recall: 0.614
+  - mAP50: 0.538
+  - mAP50-95: 0.327
+
+Interpretation:
+Increasing batch size from 1 to 2 slightly reduced precision but improved recall, mAP50, and mAP50-95 compared with the strict frozen-head 512 baseline. However, the improvement was smaller than the improvement from increasing image size to 640.
