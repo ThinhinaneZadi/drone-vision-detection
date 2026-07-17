@@ -235,3 +235,18 @@ Some challenges I expect during this project are:
 The long-term direction of this project is to support drone swarm simulation and federated learning research. The object detection pipeline can become the computer vision baseline that later allows multiple drone agents or simulated clients to train and evaluate models without using a single centralized dataset.
 
 This project starts with a simple goal: make object detection work properly on VisDrone. From there, it can grow into a stronger research pipeline for drone perception and federated learning.
+## Best Trained Model
+
+The best-performing YOLO11s checkpoint is located at:
+
+`models/best_yolo11s_visdrone.pt`
+
+Validation performance:
+
+- Precision: 0.579
+- Recall: 0.469
+- mAP50: 0.464
+- mAP50-95: 0.280
+
+This checkpoint is recommended for inference, tracking, and future federated learning experiments.
+
