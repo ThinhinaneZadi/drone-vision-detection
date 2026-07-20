@@ -39,7 +39,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tier", type=int, choices=[20, 50, 100], required=True)
     ap.add_argument("--clients", required=True,
-                    help="comma-separated group ids, e.g. 9999981,9999960")
+                    help="comma-separated group ids, or 'all' for every "
+                         "client in the tier")
     ap.add_argument("--rounds", type=int, default=1)
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--batch", type=int, default=2)
@@ -59,7 +60,10 @@ def main() -> None:
         for row in csv.DictReader(fh):
             counts[row["group_id"]] = int(row["n_train_images"])
 
-    gids = [g.strip() for g in args.clients.split(",") if g.strip()]
+    if args.clients.strip().lower() == "all":
+        gids = sorted(counts)
+    else:
+        gids = [g.strip() for g in args.clients.split(",") if g.strip()]
     for g in gids:
         if g not in counts:
             sys.exit(f"ERROR: group {g} not in tier{args.tier} partition")
