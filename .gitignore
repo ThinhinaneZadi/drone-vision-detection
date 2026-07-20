@@ -18,3 +18,4 @@ __pycache__/
 # Environment and system files
 .env
 .DS_Store
+federated/experiments/partitions/
