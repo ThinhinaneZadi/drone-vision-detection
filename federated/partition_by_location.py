@@ -5,8 +5,10 @@ Reads federated/experiments/registry/clients.csv, selects clients eligible at
 the chosen tier, and writes per-client train lists + YAMLs plus one shared
 clean global validation list. No images are copied; only path lists.
 
-Deterministic: no randomness (clients train on all local images; validation
-is the shared clean global val set).
+Optional --local-val-frac holds out a deterministic slice of each client's
+images (every k-th image of the sorted list) as a per-client local validation
+set, written to a separate partition directory so existing partitions are
+untouched. Deterministic: no randomness anywhere.
 """
 
 from pathlib import Path
@@ -20,7 +22,6 @@ TRAIN_IMG = REPO / "data/VisDrone-DET/VisDrone2019-DET-train/images"
 VAL_IMG   = REPO / "data/VisDrone-DET/VisDrone2019-DET-val/images"
 IMG_EXTS = {".jpg", ".jpeg", ".png"}
 
-# Must match visdrone.yaml — verify against your existing training config.
 CLASS_NAMES = ["pedestrian", "people", "bicycle", "car", "van", "truck",
                "tricycle", "awning-tricycle", "bus", "motor"]
 
@@ -37,8 +38,13 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tier", type=int, choices=[20, 50, 100], required=True,
                     help="minimum images per client (eligibility tier)")
+    ap.add_argument("--local-val-frac", type=float, default=0.0,
+                    help="fraction of each client's images held out as a "
+                         "local validation set (0 = none, old behavior)")
     args = ap.parse_args()
 
+    if not 0.0 <= args.local_val_frac < 0.5:
+        sys.exit("ERROR: --local-val-frac must be in [0, 0.5)")
     if not REGISTRY.is_file():
         sys.exit(f"ERROR: registry not found: {REGISTRY} "
                  "(run inspect_locations.py first)")
@@ -51,10 +57,17 @@ def main() -> None:
     print(f"tier >= {args.tier}: {len(eligible)} eligible clients, "
           f"{len(overlap_groups)} overlap groups excluded from clean val")
 
-    out_root = REPO / f"federated/experiments/partitions/tier{args.tier}"
+    suffix = ""
+    stride = 0
+    if args.local_val_frac > 0:
+        stride = round(1.0 / args.local_val_frac)
+        suffix = f"_lv{int(args.local_val_frac * 100)}"
+        print(f"local val: holding out every {stride}th image "
+              f"(~{100 / stride:.0f}%) per client")
+
+    out_root = REPO / f"federated/experiments/partitions/tier{args.tier}{suffix}"
     out_root.mkdir(parents=True, exist_ok=True)
 
-    # ---- shared clean global validation list -------------------------
     val_imgs = [p for p in list_images(VAL_IMG)
                 if p.name.split("_", 1)[0] not in overlap_groups]
     missing = [p for p in val_imgs if not label_for(p).is_file()]
@@ -65,7 +78,6 @@ def main() -> None:
     clean_val_txt.write_text("\n".join(str(p) for p in val_imgs) + "\n")
     print(f"clean global val: {len(val_imgs)} images -> {clean_val_txt}")
 
-    # ---- per-client lists and YAMLs -----------------------------------
     summary = []
     for r in eligible:
         gid = r["group_id"]
@@ -81,8 +93,17 @@ def main() -> None:
             sys.exit(f"ERROR: client {gid}: {len(missing)} images missing "
                      f"labels, e.g. {missing[0].name}")
 
+        if stride > 0:
+            local_val = [p for i, p in enumerate(imgs) if i % stride == 0]
+            train = [p for i, p in enumerate(imgs) if i % stride != 0]
+            (client_dir / "local_val.txt").write_text(
+                "\n".join(str(p) for p in local_val) + "\n")
+        else:
+            local_val = []
+            train = imgs
+
         train_txt = client_dir / "train.txt"
-        train_txt.write_text("\n".join(str(p) for p in imgs) + "\n")
+        train_txt.write_text("\n".join(str(p) for p in train) + "\n")
 
         names_block = "\n".join(f"  {i}: {n}" for i, n in enumerate(CLASS_NAMES))
         (client_dir / "data.yaml").write_text(
@@ -92,7 +113,8 @@ def main() -> None:
             f"names:\n{names_block}\n"
         )
         summary.append({"client_id": f"client_{gid}", "group_id": gid,
-                        "n_train_images": len(imgs),
+                        "n_train_images": len(train),
+                        "n_local_val_images": len(local_val),
                         "origin_inferred": r["origin_inferred"]})
 
     with (out_root / "partition_summary.csv").open("w", newline="") as fh:
