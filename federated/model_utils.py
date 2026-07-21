@@ -24,6 +24,42 @@ def get_state(path: Path) -> dict:
     return {k: v.detach().cpu().float().clone()
             for k, v in model.model.state_dict().items()}
 
+def count_trainable_params(ckpt_path: Path, freeze_n: int) -> dict:
+    """Count trainable vs frozen parameters for a given freeze depth.
+
+    Ultralytics' freeze=N freezes top-level layers 0..N-1. This counts
+    parameters at that same granularity so the number matches what
+    actually happens during model.train(freeze=N).
+    """
+    model = YOLO(str(ckpt_path))
+    net = model.model
+    total = sum(p.numel() for p in net.parameters())
+
+    if freeze_n <= 0:
+        trainable = total
+    else:
+        frozen = 0
+        for name, p in net.named_parameters():
+            # top-level layer index is the first dotted segment after "model."
+            parts = name.split(".")
+            layer_idx = None
+            for i, part in enumerate(parts):
+                if part.isdigit():
+                    layer_idx = int(part)
+                    break
+            if layer_idx is not None and layer_idx < freeze_n:
+                frozen += p.numel()
+        trainable = total - frozen
+
+    bytes_per_param = 4  # fp32, matches get_state()'s float() cast
+    return {
+        "freeze": freeze_n,
+        "total": total,
+        "trainable": trainable,
+        "trainable_pct": 100.0 * trainable / total,
+        "trainable_bytes": trainable * bytes_per_param,
+    }
+
 def check_compatible(states: list[dict]) -> None:
     keys = set(states[0])
     for i, s in enumerate(states[1:], 1):
@@ -165,8 +201,16 @@ def selftest() -> None:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--count-params", type=int, default=None,
+                    help="print trainable/frozen param counts for this "
+                         "freeze depth and exit")
     args = ap.parse_args()
-    if args.selftest:
+    if args.count_params is not None:
+        info = count_trainable_params(BEST, args.count_params)
+        print(f"freeze={info['freeze']}: {info['trainable']:,} / "
+              f"{info['total']:,} trainable ({info['trainable_pct']:.1f}%), "
+              f"{info['trainable_bytes'] / 1e6:.2f} MB/round (fp32)")
+    elif args.selftest:
         selftest()
     else:
         print("import module or run with --selftest")

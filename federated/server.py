@@ -1,6 +1,8 @@
 """
 server.py — federated round loop: sequential client training (subprocesses),
 sample-weighted FedAvg aggregation, and clean-global-val evaluation.
+Supports layer freezing (--freeze N) and continuous-LR mode for many-round
+schedules (--continuous-lr). Logs trainable/communicated parameter counts.
 """
 
 from pathlib import Path
@@ -14,7 +16,7 @@ import time
 import torch
 from ultralytics import YOLO
 
-from model_utils import get_state, fedavg, save_aggregated
+from model_utils import get_state, fedavg, save_aggregated, count_trainable_params
 
 REPO = Path(__file__).resolve().parents[1]
 CLASS_NAMES = ["pedestrian", "people", "bicycle", "car", "van", "truck",
@@ -38,23 +40,43 @@ def evaluate(ckpt: Path, eval_yaml: Path, tag: str) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tier", type=int, choices=[20, 50, 100], required=True)
+    ap.add_argument("--partition", default=None,
+                    help="partition directory name under experiments/partitions/ "
+                         "(default: tier{tier})")
     ap.add_argument("--clients", required=True,
                     help="comma-separated group ids, or 'all' for every "
                          "client in the tier")
     ap.add_argument("--rounds", type=int, default=1)
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--batch", type=int, default=2)
+    ap.add_argument("--freeze", type=int, default=0,
+                    help="freeze the first N model layers in local training")
+    ap.add_argument("--continuous-lr", action="store_true",
+                    help="disable per-round warmup; use fixed small lr0 "
+                         "(recommended for --rounds >= ~10)")
+    ap.add_argument("--lr0", type=float, default=0.001)
     ap.add_argument("--init", default="models/best_yolo11s_visdrone.pt")
     ap.add_argument("--exp-name", default=None)
     ap.add_argument("--keep-client-ckpts", action="store_true")
+    ap.add_argument("--eval-every", type=int, default=1,
+                    help="evaluate global model every N rounds (default: "
+                         "every round; use e.g. 5 for long 50-100 round runs "
+                         "to save time)")
     args = ap.parse_args()
 
-    part_root = REPO / f"federated/experiments/partitions/tier{args.tier}"
+    if args.rounds >= 10 and not args.continuous_lr:
+        print(f"WARNING: {args.rounds} rounds requested without "
+              f"--continuous-lr — every round will restart LR warmup, "
+              f"which is very likely to distort results at this length.")
+
+    part_name = args.partition or f"tier{args.tier}"
+    part_root = REPO / f"federated/experiments/partitions/{part_name}"
+    if not part_root.is_dir():
+        sys.exit(f"ERROR: partition not found: {part_root}")
     init_ckpt = (REPO / args.init).resolve()
     if not init_ckpt.is_file():
         sys.exit(f"ERROR: init checkpoint not found: {init_ckpt}")
 
-    # sample counts (FedAvg weights) from the partition summary
     counts = {}
     with (part_root / "partition_summary.csv").open() as fh:
         for row in csv.DictReader(fh):
@@ -66,11 +88,11 @@ def main() -> None:
         gids = [g.strip() for g in args.clients.split(",") if g.strip()]
     for g in gids:
         if g not in counts:
-            sys.exit(f"ERROR: group {g} not in tier{args.tier} partition")
+            sys.exit(f"ERROR: group {g} not in partition {part_name}")
         if not (part_root / f"client_{g}" / "data.yaml").is_file():
             sys.exit(f"ERROR: missing data.yaml for client_{g}")
 
-    exp_name = args.exp_name or f"tier{args.tier}_c{len(gids)}_r{args.rounds}_e{args.epochs}"
+    exp_name = args.exp_name or f"{part_name}_c{len(gids)}_r{args.rounds}_e{args.epochs}"
     exp_dir = REPO / "federated/experiments" / exp_name
     exp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -80,53 +102,82 @@ def main() -> None:
     eval_yaml.write_text(f"train: {clean_val}\nval: {clean_val}\n"
                          f"names:\n{names_block}\n")
 
+    param_info = count_trainable_params(init_ckpt, args.freeze)
+    print(f"parameters: {param_info['trainable']:,} trainable / "
+          f"{param_info['total']:,} total "
+          f"({param_info['trainable_pct']:.1f}%), "
+          f"~{param_info['trainable_bytes'] / 1e6:.1f} MB communicated/round "
+          f"(fp32)")
+
     config = vars(args) | {"clients": gids,
-                           "sample_counts": {g: counts[g] for g in gids}}
+                           "sample_counts": {g: counts[g] for g in gids},
+                           "param_info": param_info}
     (exp_dir / "config.json").write_text(json.dumps(config, indent=2))
     print(f"experiment: {exp_name}\nclients: "
           f"{', '.join(f'{g}({counts[g]} imgs)' for g in gids)}")
 
     metrics = [evaluate(init_ckpt, eval_yaml, "initial_global")]
     global_ckpt = init_ckpt
+    comm_log = []   # per-round communicated bytes (trainable params only)
 
     for rnd in range(1, args.rounds + 1):
         rdir = exp_dir / f"round{rnd}"
         rdir.mkdir(exist_ok=True)
         client_ckpts = []
+        t_round0 = time.time()
 
         for g in gids:
             out = rdir / f"client_{g}.pt"
-            print(f"\n--- round {rnd}: training client_{g} "
-                  f"({counts[g]} images) ---")
-            t0 = time.time()
             cmd = [sys.executable, str(REPO / "federated/client_train.py"),
                    "--data", str(part_root / f"client_{g}" / "data.yaml"),
                    "--init", str(global_ckpt),
                    "--out", str(out),
                    "--epochs", str(args.epochs),
-                   "--batch", str(args.batch)]
-            res = subprocess.run(cmd)
+                   "--batch", str(args.batch),
+                   "--freeze", str(args.freeze)]
+            if args.continuous_lr:
+                cmd += ["--continuous-lr", "--lr0", str(args.lr0)]
+            res = subprocess.run(cmd, capture_output=True, text=True)
             if res.returncode != 0 or not out.is_file():
-                sys.exit(f"ERROR: client_{g} training failed (round {rnd})")
-            print(f"client_{g} done in {time.time() - t0:.0f}s")
+                sys.exit(f"ERROR: client_{g} training failed (round {rnd})\n"
+                         f"{res.stdout[-2000:]}\n{res.stderr[-2000:]}")
             client_ckpts.append(out)
 
-        for g, ck in zip(gids, client_ckpts):
-            metrics.append(evaluate(ck, eval_yaml, f"round{rnd}_client_{g}"))
+        # per-round communication: each client sends trainable params up,
+        # receives them back down -> 2x trainable params per client per round
+        comm_bytes_round = 2 * len(gids) * param_info["trainable_bytes"]
+        comm_log.append({"round": rnd, "comm_bytes": comm_bytes_round})
+
+        do_eval = (rnd % args.eval_every == 0) or (rnd == args.rounds)
+        if do_eval:
+            for g, ck in zip(gids, client_ckpts):
+                metrics.append(evaluate(ck, eval_yaml, f"round{rnd}_client_{g}"))
 
         states = [get_state(ck) for ck in client_ckpts]
         weights = [float(counts[g]) for g in gids]
         agg = fedavg(states, weights)
         new_global = rdir / f"global_round{rnd}.pt"
         save_aggregated(init_ckpt, agg, new_global)
-        metrics.append(evaluate(new_global, eval_yaml, f"round{rnd}_global"))
+
+        if do_eval:
+            metrics.append(evaluate(new_global, eval_yaml, f"round{rnd}_global"))
         global_ckpt = new_global
 
         if not args.keep_client_ckpts:
             for ck in client_ckpts:
                 ck.unlink()
 
+        elapsed = time.time() - t_round0
+        print(f"round {rnd}/{args.rounds} done in {elapsed:.0f}s"
+              + (" (evaluated)" if do_eval else " (eval skipped)"))
+
         (exp_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+        (exp_dir / "communication_log.json").write_text(
+            json.dumps(comm_log, indent=2))
+
+    total_comm = sum(r["comm_bytes"] for r in comm_log)
+    print(f"\ntotal communicated (fp32, upload+download): "
+          f"{total_comm / 1e9:.2f} GB over {args.rounds} rounds")
 
     print("\n===== summary =====")
     for m in metrics:
