@@ -3,6 +3,7 @@ server.py — federated round loop: sequential client training (subprocesses),
 sample-weighted FedAvg aggregation, and clean-global-val evaluation.
 Supports layer freezing (--freeze N) and continuous-LR mode for many-round
 schedules (--continuous-lr). Logs trainable/communicated parameter counts.
+Client subprocess output streams live (not buffered) to avoid pipe deadlock.
 """
 
 from pathlib import Path
@@ -36,6 +37,19 @@ def evaluate(ckpt: Path, eval_yaml: Path, tag: str) -> dict:
     print(f"EVAL {tag}: P={m['precision']} R={m['recall']} "
           f"mAP50={m['mAP50']} mAP50-95={m['mAP50_95']}")
     return m
+
+def run_client_streaming(cmd: list[str]) -> tuple[int, str]:
+    """Run a client subprocess, streaming its output live to stdout while
+    also collecting it (for error reporting on failure). Avoids the pipe
+    deadlock that subprocess.run(capture_output=True) can hit."""
+    lines = []
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+    for line in proc.stdout:
+        print(line, end="")
+        lines.append(line)
+    proc.wait()
+    return proc.returncode, "".join(lines)
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -118,7 +132,7 @@ def main() -> None:
 
     metrics = [evaluate(init_ckpt, eval_yaml, "initial_global")]
     global_ckpt = init_ckpt
-    comm_log = []   # per-round communicated bytes (trainable params only)
+    comm_log = []
 
     for rnd in range(1, args.rounds + 1):
         rdir = exp_dir / f"round{rnd}"
@@ -128,6 +142,9 @@ def main() -> None:
 
         for g in gids:
             out = rdir / f"client_{g}.pt"
+            print(f"\n--- round {rnd}: training client_{g} "
+                  f"({counts[g]} images) ---")
+            t0 = time.time()
             cmd = [sys.executable, str(REPO / "federated/client_train.py"),
                    "--data", str(part_root / f"client_{g}" / "data.yaml"),
                    "--init", str(global_ckpt),
@@ -137,14 +154,13 @@ def main() -> None:
                    "--freeze", str(args.freeze)]
             if args.continuous_lr:
                 cmd += ["--continuous-lr", "--lr0", str(args.lr0)]
-            res = subprocess.run(cmd, capture_output=True, text=True)
-            if res.returncode != 0 or not out.is_file():
-                sys.exit(f"ERROR: client_{g} training failed (round {rnd})\n"
-                         f"{res.stdout[-2000:]}\n{res.stderr[-2000:]}")
+            rc, output = run_client_streaming(cmd)
+            if rc != 0 or not out.is_file():
+                sys.exit(f"ERROR: client_{g} training failed (round {rnd}, "
+                         f"exit code {rc})")
+            print(f"client_{g} done in {time.time() - t0:.0f}s")
             client_ckpts.append(out)
 
-        # per-round communication: each client sends trainable params up,
-        # receives them back down -> 2x trainable params per client per round
         comm_bytes_round = 2 * len(gids) * param_info["trainable_bytes"]
         comm_log.append({"round": rnd, "comm_bytes": comm_bytes_round})
 
