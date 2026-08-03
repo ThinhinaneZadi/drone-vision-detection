@@ -4,6 +4,7 @@ sample-weighted FedAvg aggregation, and clean-global-val evaluation.
 
 Features:
 - --freeze N: layer freezing during local training
+- --prox-mu: FedProx proximal term strength (0 = plain FedAvg)
 - --continuous-lr: fixed small lr0, no per-round warmup restart (required
   for many-round schedules)
 - --epoch-schedule: vary local epochs across rounds, e.g.
@@ -11,17 +12,24 @@ Features:
 - --imgsz: evaluation/training image size (was hardcoded to 640; now
   configurable so it can match the resolution the init checkpoint was
   actually trained/validated at, e.g. 960)
+- --use-profile-class-weights: for partial-label-space experiments — looks
+  up each client's assigned mission profile (federated/assign_label_profiles.py)
+  and passes that client's specific 10-value class-weight string to
+  client_train.py automatically. Requires running on a partition built by
+  build_partial_label_partition.py (e.g. tier100_partial_labels), so the
+  labels a client actually sees match the weights being applied.
 - --resume: continue an existing experiment from its last completed round
   (reads config.json/metrics.json, finds the last saved global checkpoint)
 - Every round: saves metrics.json (all eval results), communication_log.json,
   round{N}/client_losses.json, and round_summary.csv (one row per round with
-  loss + accuracy + params + communication in a single table)
+  loss + accuracy + params + communication + exact step count in one table)
 """
 
 from pathlib import Path
 import argparse
 import csv
 import json
+import math
 import re
 import subprocess
 import sys
@@ -124,6 +132,12 @@ def main() -> None:
     ap.add_argument("--freeze", type=int, default=0)
     ap.add_argument("--prox-mu", type=float, default=0.0,
                     help="FedProx proximal term strength (0 = plain FedAvg)")
+    ap.add_argument("--use-profile-class-weights", action="store_true",
+                    help="for partial-label-space experiments: look up each "
+                         "client's assigned mission profile and pass its "
+                         "specific class-weight string automatically. "
+                         "Requires a partition built by "
+                         "build_partial_label_partition.py.")
     ap.add_argument("--continuous-lr", action="store_true")
     ap.add_argument("--lr0", type=float, default=0.001)
     ap.add_argument("--init", default="models/best_yolo11s_visdrone.pt")
@@ -136,6 +150,13 @@ def main() -> None:
     if args.rounds >= 10 and not args.continuous_lr:
         print(f"WARNING: {args.rounds} rounds requested without "
               f"--continuous-lr — every round will restart LR warmup.")
+
+    client_weight_strings = {}
+    if args.use_profile_class_weights:
+        from assign_label_profiles import get_client_weight_strings
+        client_weight_strings = get_client_weight_strings()
+        print(f"profile-based class weights ENABLED for "
+              f"{len(client_weight_strings)} clients")
 
     part_name = args.partition or f"tier{args.tier}"
     part_root = REPO / f"federated/experiments/partitions/{part_name}"
@@ -159,6 +180,9 @@ def main() -> None:
             sys.exit(f"ERROR: group {g} not in partition {part_name}")
         if not (part_root / f"client_{g}" / "data.yaml").is_file():
             sys.exit(f"ERROR: missing data.yaml for client_{g}")
+        if args.use_profile_class_weights and g not in client_weight_strings:
+            sys.exit(f"ERROR: --use-profile-class-weights set but no profile "
+                     f"assignment found for client {g}")
 
     exp_name = args.exp_name or f"{part_name}_c{len(gids)}_r{args.rounds}_e{args.epochs}"
     exp_dir = REPO / "federated/experiments" / exp_name
@@ -211,7 +235,8 @@ def main() -> None:
         config = vars(args) | {"clients": gids,
                                "sample_counts": {g: counts[g] for g in gids},
                                "param_info": param_info,
-                               "epoch_schedule_resolved": epoch_sched}
+                               "epoch_schedule_resolved": epoch_sched,
+                               "client_weight_strings": client_weight_strings}
         (exp_dir / "config.json").write_text(json.dumps(config, indent=2))
         print(f"experiment: {exp_name}\nclients: "
               f"{', '.join(f'{g}({counts[g]} imgs)' for g in gids)}")
@@ -243,6 +268,8 @@ def main() -> None:
                    "--imgsz", str(args.imgsz),
                    "--freeze", str(args.freeze),
                    "--prox-mu", str(args.prox_mu)]
+            if args.use_profile_class_weights:
+                cmd += ["--class-weights", client_weight_strings[g]]
             if args.continuous_lr:
                 cmd += ["--continuous-lr", "--lr0", str(args.lr0)]
             rc, output = run_client_streaming(cmd)
@@ -259,6 +286,12 @@ def main() -> None:
         comm_bytes_round = 2 * len(gids) * param_info["trainable_bytes"]
         comm_log.append({"round": rnd, "epochs": rnd_epochs,
                          "comm_bytes": comm_bytes_round})
+
+        # exact mini-batch step count this round, logged directly rather
+        # than left for the reader to recompute from batch size + image counts
+        total_steps_round = sum(
+            math.ceil(counts[g] / args.batch) * rnd_epochs for g in gids
+        )
 
         do_eval = (rnd % args.eval_every == 0) or (rnd == args.rounds)
         if do_eval:
@@ -303,6 +336,7 @@ def main() -> None:
             "total_params": param_info["total"],
             "trainable_pct": round(param_info["trainable_pct"], 2),
             "comm_MB_this_round": round(comm_bytes_round / 1e6, 2),
+            "total_steps_this_round": total_steps_round,
             "avg_box_loss": round(sum(box_vals) / len(box_vals), 5) if box_vals else None,
             "avg_cls_loss": round(sum(cls_vals) / len(cls_vals), 5) if cls_vals else None,
             "avg_dfl_loss": round(sum(dfl_vals) / len(dfl_vals), 5) if dfl_vals else None,

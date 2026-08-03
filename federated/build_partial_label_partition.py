@@ -18,11 +18,15 @@ partition — we want to measure each client's restricted training against
 real ground truth, not against its own limited view. That is the whole
 point of the partial-label-space experiment.
 
+Writes partition_summary.csv (group_id, n_train_images, profile) matching
+the format server.py expects to read client image counts from.
+
 See docs/partial_label_profiles.md for the full methodology behind the
 profile assignments used here.
 """
 from pathlib import Path
 import argparse
+import csv
 import sys
 
 from assign_label_profiles import assign_profiles, PROFILES, CLASS_NAMES
@@ -64,7 +68,6 @@ def main() -> None:
 
     assignment = assign_profiles()
 
-    # clean_val.txt stays FULL/unfiltered — copy the reference, don't alter it
     src_clean_val = src_root / "clean_val.txt"
     if not src_clean_val.is_file():
         sys.exit(f"ERROR: {src_clean_val} not found")
@@ -74,6 +77,7 @@ def main() -> None:
     names_block = "\n".join(f"  {i}: {n}" for i, n in enumerate(CLASS_NAMES))
 
     n_clients_done = 0
+    summary_rows = []
     for client_id, profile_name in sorted(assignment.items()):
         src_client_dir = src_root / f"client_{client_id}"
         src_train_txt = src_client_dir / "train.txt"
@@ -95,13 +99,11 @@ def main() -> None:
         n_lines_before = 0
         n_lines_after = 0
         for img_path in image_paths:
-            # symlink the image itself (no copy — saves disk, images unchanged)
             link_path = out_images_dir / img_path.name
             if not link_path.exists():
                 link_path.symlink_to(img_path)
             new_image_paths.append(str(link_path.resolve()))
 
-            # filter the matching label file
             src_label_path = img_path.parent.parent / "labels" / (img_path.stem + ".txt")
             n_lines_before += len(src_label_path.read_text().splitlines()) if src_label_path.is_file() else 0
             kept_lines = filter_label_file(src_label_path, allowed_classes)
@@ -126,6 +128,20 @@ def main() -> None:
               f"{len(image_paths)} images, "
               f"{n_lines_before} -> {n_lines_after} label lines kept ({pct_kept:.1f}%)")
         n_clients_done += 1
+        summary_rows.append({
+            "client_id": f"client_{client_id}",
+            "group_id": client_id,
+            "n_train_images": len(image_paths),
+            "profile": profile_name,
+        })
+
+    if summary_rows:
+        summary_csv = out_root / "partition_summary.csv"
+        with summary_csv.open("w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(summary_rows[0].keys()))
+            w.writeheader()
+            w.writerows(summary_rows)
+        print(f"wrote {summary_csv}")
 
     print(f"\nwrote {n_clients_done} client partitions under {out_root}")
 

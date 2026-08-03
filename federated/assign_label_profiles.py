@@ -54,8 +54,11 @@ MIN_INSTANCES = 20  # minimum real instances of a class to call it "supported"
 
 # Real per-client class instance counts, from
 # federated/experiments/partitions/tier100/*/train.txt label files,
-# counted 2026-08-03 (see docs/partial_label_profiles.md for the exact
-# command used to derive this).
+# corrected 2026-08-03 using per-file Python reads (the original count used
+# `cat file1 file2 | awk` which silently merges lines across file boundaries
+# when files lack trailing newlines — true of all VisDrone label files; see
+# docs/partial_label_profiles.md for the full correction writeup). The
+# correction did not change any profile assignment.
 CLIENT_CLASS_COUNTS = {
     "9999937": {0:3227, 1:1838, 2:295, 3:2026, 4:562, 5:698, 6:1128, 7:1209, 8:42, 9:2709},
     "9999940": {0:1005, 1:83, 2:36, 3:2429, 4:1019, 5:454, 6:1, 8:285, 9:175},
@@ -119,6 +122,22 @@ def assign_profiles() -> dict[str, str]:
     return assigned
 
 
+def profile_to_weight_string(profile_name: str) -> str:
+    """Convert a profile name into the comma-separated 10-value weight
+    string client_train.py's --class-weights expects: 1.0 for classes in
+    the profile, 0.0 for classes outside it."""
+    allowed = set(PROFILES[profile_name])
+    weights = [1.0 if i in allowed else 0.0 for i in range(10)]
+    return ",".join(str(w) for w in weights)
+
+
+def get_client_weight_strings() -> dict[str, str]:
+    """Convenience function for server.py: returns {client_id: weight_string}
+    for every client, ready to pass directly as --class-weights."""
+    assignment = assign_profiles()
+    return {c: profile_to_weight_string(p) for c, p in assignment.items()}
+
+
 if __name__ == "__main__":
     assignment = assign_profiles()
     print(f"{'client':<10} {'profile':<16} {'classes labeled'}")
@@ -129,3 +148,4 @@ if __name__ == "__main__":
 
     from collections import Counter
     print(f"\nProfile counts: {dict(Counter(assignment.values()))}")
+
