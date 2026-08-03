@@ -1,24 +1,19 @@
 """
 client_train.py — train ONE federated client locally, then exit.
-
 Designed to be launched as a subprocess by server.py so GPU memory is
 fully released between sequential clients (critical on 4 GB VRAM).
 Supports layer freezing (freeze the first N layers during local training).
-
 --continuous-lr disables per-round warmup and uses a small fixed learning
 rate, appropriate for multi-round (50-100+) federated schedules where
 restarting warmup every round would prevent the model from ever training
 at a stable rate.
 """
-
 from pathlib import Path
 import argparse
 import shutil
 import sys
 from ultralytics import YOLO
-
 REPO = Path(__file__).resolve().parents[1]
-
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True, help="client data.yaml")
@@ -39,18 +34,25 @@ def main() -> None:
     ap.add_argument("--run-dir", default="federated/experiments/runs_local")
     args = ap.parse_args()
 
+    # SAFEGUARD: refuse a freeze value that would leave nothing trainable.
+    # The detection head starts around layer 23 for yolo11s, so
+    # freeze>=23 would freeze the entire model — this caused a real bug
+    # once (Option B run silently trained 0 parameters for 36 rounds).
+    if args.freeze >= 23:
+        sys.exit(f"ERROR: --freeze {args.freeze} would freeze the entire "
+                  f"model (layer 23 is the detection head) — no parameters "
+                  f"would be trainable. This is almost certainly a mistake; "
+                  f"pass a smaller --freeze value or --freeze 0.")
+
     data, init, out = Path(args.data), Path(args.init), Path(args.out)
     if not data.is_file():
         sys.exit(f"ERROR: data yaml not found: {data}")
     if not init.is_file():
         sys.exit(f"ERROR: init checkpoint not found: {init}")
-
     client_name = data.parent.name          # e.g. client_9999981
-
     run_dir = Path(args.run_dir)
     if not run_dir.is_absolute():
         run_dir = (REPO / run_dir).resolve()
-
     train_kwargs = dict(
         data=str(data),
         epochs=args.epochs,
@@ -68,7 +70,6 @@ def main() -> None:
         exist_ok=True,
         verbose=True,
     )
-
     if args.continuous_lr:
         # fixed lr, no per-round warmup restart, no auto-optimizer reselection
         train_kwargs.update(
@@ -80,14 +81,30 @@ def main() -> None:
         )
 
     model = YOLO(str(init))
-    model.train(**train_kwargs)
 
+    # SAFEGUARD: print trainable parameter count/percentage BEFORE training
+    # starts, every round, so a freeze mistake is visible immediately in
+    # the logs instead of silently hiding for many rounds.
+    n_total = sum(p.numel() for p in model.model.parameters())
+    n_trainable = sum(
+        p.numel() for name, p in model.model.named_parameters()
+        if not (args.freeze > 0
+                and any(name.startswith(f"model.{j}.") for j in range(args.freeze)))
+    )
+    print(f"CLIENT_INFO client={client_name} freeze={args.freeze} "
+          f"trainable={n_trainable:,}/{n_total:,} "
+          f"({100 * n_trainable / n_total:.1f}%)")
+    if n_trainable == 0:
+        sys.exit(f"ERROR: 0 trainable parameters for client={client_name} "
+                  f"with freeze={args.freeze} — refusing to train nothing.")
+
+    model.train(**train_kwargs)
     trained = run_dir / client_name / "weights/last.pt"
     if not trained.is_file():
         sys.exit(f"ERROR: expected trained weights not found: {trained}")
     out.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(trained, out)
     print(f"CLIENT_DONE name={client_name} weights={out}")
-
 if __name__ == "__main__":
     main()
+
