@@ -23,6 +23,18 @@ for c in <client_ids>; do
     | awk '{print $1}' | sort -n | uniq -c
 done
 ```
+**Correction (2026-08-03):** the `cat file1.txt file2.txt | awk ...` approach
+above silently undercounts when label files don't end in a trailing
+newline (VisDrone's label files never do) — `cat` merges the last line of
+one file with the first line of the next at file boundaries. This was
+caught and verified during development (see git history), and all counts
+in this document and in `assign_label_profiles.py` were recomputed using
+per-file Python reads (`Path.read_text().splitlines()`), which has no such
+issue. The corrected counts are consistently 1-3% higher than the original
+`cat`-based ones, but critically: which classes are completely ABSENT per
+client (the property the profile assignment actually depends on) is
+IDENTICAL under both methods, so this correction does not change any
+profile assignment — verified directly, not assumed.
 
 Class index -> name mapping (matches visdrone.yaml):
 0=pedestrian, 1=people, 2=bicycle, 3=car, 4=van, 5=truck, 6=tricycle,
