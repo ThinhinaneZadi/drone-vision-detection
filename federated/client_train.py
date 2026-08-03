@@ -10,25 +10,39 @@ at a stable rate.
 --prox-mu > 0 enables FedProx: a proximal term that discourages this
 client's local weights from drifting too far from the global model it
 started the round with (see federated/fedprox.py).
+--class-weights enables FIXED per-class loss weighting for partial-label-
+space experiments: a client whose profile excludes certain classes can
+set those classes' weight to 0.0, so the loss neither rewards nor
+punishes predictions there (see docs/partial_label_profiles.md).
+
+NOTE: setting `model.class_weights` on the YOLO wrapper's .model BEFORE
+calling .train() does NOT work — Ultralytics constructs its own internal
+training model/trainer objects with different identities, verified via
+id() debug instrumentation during development (see git history). The
+correct hook is overriding DetectionTrainer.set_class_weights(), which
+Ultralytics itself calls at the correct point in setup, normally to
+auto-compute class weights from --cls_pw; we override it to apply our
+FIXED weights instead when --class-weights is given.
 """
 from pathlib import Path
 import argparse
 import csv
 import shutil
 import sys
+import torch
 from ultralytics import YOLO
 from ultralytics.models.yolo.detect import DetectionTrainer
 REPO = Path(__file__).resolve().parents[1]
 
 
-def make_fedprox_trainer(prox_mu, global_state_dict):
-    """Build a DetectionTrainer subclass with FedProx's optimizer swapped
-    in, capturing prox_mu/global_state_dict via closure instead of class
-    attributes (avoids any cross-run state leaking between subprocess
-    invocations, though each run is a fresh process anyway)."""
+def make_custom_trainer(prox_mu, global_state_dict, fixed_class_weights):
+    """Build a DetectionTrainer subclass with FedProx's optimizer and/or
+    fixed class weights swapped in, as needed. Captures everything via
+    closure rather than class attributes, since each subprocess run is
+    a fresh process anyway but this avoids any risk of state leaking."""
     from fedprox import ProxAdamW
 
-    class FedProxTrainer(DetectionTrainer):
+    class CustomTrainer(DetectionTrainer):
         def build_optimizer(self, model, name="AdamW", lr=0.001, momentum=0.9,
                              decay=1e-5, iterations=1e5):
             if prox_mu <= 0:
@@ -40,7 +54,14 @@ def make_fedprox_trainer(prox_mu, global_state_dict):
             return ProxAdamW(trainable, global_params, prox_mu, lr=lr,
                               betas=(momentum, 0.999), weight_decay=decay)
 
-    return FedProxTrainer
+        def set_class_weights(self):
+            if fixed_class_weights is None:
+                return super().set_class_weights()
+            self.model.class_weights = torch.tensor(
+                fixed_class_weights, device=self.device)
+            print(f"CLASS_WEIGHTS applied to trainer.model: {fixed_class_weights}")
+
+    return CustomTrainer
 
 
 def main() -> None:
@@ -63,6 +84,11 @@ def main() -> None:
     ap.add_argument("--prox-mu", type=float, default=0.0,
                     help="FedProx proximal term strength (0 = plain FedAvg, "
                          "the default; try 0.01-0.1 to start)")
+    ap.add_argument("--class-weights", default=None,
+                    help="comma-separated FIXED per-class loss weights "
+                         "(e.g. '1,1,1,0,0,0,0,0,0,0' zeroes out classes "
+                         "3-9). Overrides Ultralytics' automatic --cls_pw "
+                         "weighting. Default None = normal training.")
     ap.add_argument("--run-dir", default="federated/experiments/runs_local")
     args = ap.parse_args()
 
@@ -107,6 +133,13 @@ def main() -> None:
             cos_lr=False,
         )
 
+    fixed_class_weights = None
+    if args.class_weights:
+        fixed_class_weights = [float(w) for w in args.class_weights.split(",")]
+        if len(fixed_class_weights) != 10:
+            sys.exit(f"ERROR: --class-weights must have exactly 10 values "
+                     f"(got {len(fixed_class_weights)}): {args.class_weights}")
+
     model = YOLO(str(init))
 
     n_total = sum(p.numel() for p in model.model.parameters())
@@ -117,19 +150,21 @@ def main() -> None:
     )
     print(f"CLIENT_INFO client={client_name} freeze={args.freeze} "
           f"trainable={n_trainable:,}/{n_total:,} "
-          f"({100 * n_trainable / n_total:.1f}%) prox_mu={args.prox_mu}")
+          f"({100 * n_trainable / n_total:.1f}%) prox_mu={args.prox_mu} "
+          f"class_weights={fixed_class_weights}")
     if n_trainable == 0:
         sys.exit(f"ERROR: 0 trainable parameters for client={client_name} "
                   f"with freeze={args.freeze} — refusing to train nothing.")
 
-    if args.prox_mu > 0:
-        # capture the global model's weights BEFORE any local training
-        # happens — this is the fixed reference point ProxAdamW pulls
-        # each step back toward
-        global_state = {k: v.detach().clone()
-                         for k, v in model.model.state_dict().items()}
-        model.trainer = make_fedprox_trainer(args.prox_mu, global_state)
-        model.train(trainer=make_fedprox_trainer(args.prox_mu, global_state),
+    if args.prox_mu > 0 or fixed_class_weights is not None:
+        global_state = None
+        if args.prox_mu > 0:
+            # capture the global model's weights BEFORE any local training
+            # happens — this is the fixed reference point ProxAdamW pulls
+            # each step back toward
+            global_state = {k: v.detach().clone()
+                             for k, v in model.model.state_dict().items()}
+        model.train(trainer=make_custom_trainer(args.prox_mu, global_state, fixed_class_weights),
                     **train_kwargs)
     else:
         model.train(**train_kwargs)
