@@ -10,6 +10,7 @@ at a stable rate.
 """
 from pathlib import Path
 import argparse
+import csv
 import shutil
 import sys
 from ultralytics import YOLO
@@ -34,10 +35,6 @@ def main() -> None:
     ap.add_argument("--run-dir", default="federated/experiments/runs_local")
     args = ap.parse_args()
 
-    # SAFEGUARD: refuse a freeze value that would leave nothing trainable.
-    # The detection head starts around layer 23 for yolo11s, so
-    # freeze>=23 would freeze the entire model — this caused a real bug
-    # once (Option B run silently trained 0 parameters for 36 rounds).
     if args.freeze >= 23:
         sys.exit(f"ERROR: --freeze {args.freeze} would freeze the entire "
                   f"model (layer 23 is the detection head) — no parameters "
@@ -49,7 +46,7 @@ def main() -> None:
         sys.exit(f"ERROR: data yaml not found: {data}")
     if not init.is_file():
         sys.exit(f"ERROR: init checkpoint not found: {init}")
-    client_name = data.parent.name          # e.g. client_9999981
+    client_name = data.parent.name
     run_dir = Path(args.run_dir)
     if not run_dir.is_absolute():
         run_dir = (REPO / run_dir).resolve()
@@ -61,7 +58,7 @@ def main() -> None:
         device=args.device,
         seed=args.seed,
         freeze=args.freeze if args.freeze > 0 else None,
-        val=False,                # evaluation happens separately on clean val
+        val=False,
         plots=False,
         cache=False,
         workers=2,
@@ -71,20 +68,16 @@ def main() -> None:
         verbose=True,
     )
     if args.continuous_lr:
-        # fixed lr, no per-round warmup restart, no auto-optimizer reselection
         train_kwargs.update(
             optimizer="AdamW",
             lr0=args.lr0,
-            lrf=1.0,               # no decay within a round; lr stays ~lr0
+            lrf=1.0,
             warmup_epochs=0.0,
             cos_lr=False,
         )
 
     model = YOLO(str(init))
 
-    # SAFEGUARD: print trainable parameter count/percentage BEFORE training
-    # starts, every round, so a freeze mistake is visible immediately in
-    # the logs instead of silently hiding for many rounds.
     n_total = sum(p.numel() for p in model.model.parameters())
     n_trainable = sum(
         p.numel() for name, p in model.model.named_parameters()
@@ -102,9 +95,21 @@ def main() -> None:
     trained = run_dir / client_name / "weights/last.pt"
     if not trained.is_file():
         sys.exit(f"ERROR: expected trained weights not found: {trained}")
+
+    results_csv = run_dir / client_name / "results.csv"
+    box_loss = cls_loss = dfl_loss = "None"
+    if results_csv.is_file():
+        with results_csv.open() as f:
+            rows = list(csv.DictReader(f))
+        if rows:
+            last = rows[-1]
+            box_loss = last.get("train/box_loss", "None").strip()
+            cls_loss = last.get("train/cls_loss", "None").strip()
+            dfl_loss = last.get("train/dfl_loss", "None").strip()
+    print(f"LOSS box_loss={box_loss} cls_loss={cls_loss} dfl_loss={dfl_loss}")
+
     out.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(trained, out)
     print(f"CLIENT_DONE name={client_name} weights={out}")
 if __name__ == "__main__":
     main()
-
