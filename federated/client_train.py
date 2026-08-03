@@ -7,6 +7,9 @@ Supports layer freezing (freeze the first N layers during local training).
 rate, appropriate for multi-round (50-100+) federated schedules where
 restarting warmup every round would prevent the model from ever training
 at a stable rate.
+--prox-mu > 0 enables FedProx: a proximal term that discourages this
+client's local weights from drifting too far from the global model it
+started the round with (see federated/fedprox.py).
 """
 from pathlib import Path
 import argparse
@@ -14,7 +17,32 @@ import csv
 import shutil
 import sys
 from ultralytics import YOLO
+from ultralytics.models.yolo.detect import DetectionTrainer
 REPO = Path(__file__).resolve().parents[1]
+
+
+def make_fedprox_trainer(prox_mu, global_state_dict):
+    """Build a DetectionTrainer subclass with FedProx's optimizer swapped
+    in, capturing prox_mu/global_state_dict via closure instead of class
+    attributes (avoids any cross-run state leaking between subprocess
+    invocations, though each run is a fresh process anyway)."""
+    from fedprox import ProxAdamW
+
+    class FedProxTrainer(DetectionTrainer):
+        def build_optimizer(self, model, name="AdamW", lr=0.001, momentum=0.9,
+                             decay=1e-5, iterations=1e5):
+            if prox_mu <= 0:
+                return super().build_optimizer(model, name, lr, momentum, decay, iterations)
+            trainable = [p for p in model.parameters() if p.requires_grad]
+            trainable_names = [n for n, p in model.named_parameters() if p.requires_grad]
+            global_params = [global_state_dict[n].to(trainable[0].device)
+                              for n in trainable_names]
+            return ProxAdamW(trainable, global_params, prox_mu, lr=lr,
+                              betas=(momentum, 0.999), weight_decay=decay)
+
+    return FedProxTrainer
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True, help="client data.yaml")
@@ -32,6 +60,9 @@ def main() -> None:
                          "(needed for many-round schedules, e.g. 50-100+)")
     ap.add_argument("--lr0", type=float, default=0.001,
                     help="fixed learning rate when --continuous-lr is set")
+    ap.add_argument("--prox-mu", type=float, default=0.0,
+                    help="FedProx proximal term strength (0 = plain FedAvg, "
+                         "the default; try 0.01-0.1 to start)")
     ap.add_argument("--run-dir", default="federated/experiments/runs_local")
     args = ap.parse_args()
 
@@ -86,12 +117,23 @@ def main() -> None:
     )
     print(f"CLIENT_INFO client={client_name} freeze={args.freeze} "
           f"trainable={n_trainable:,}/{n_total:,} "
-          f"({100 * n_trainable / n_total:.1f}%)")
+          f"({100 * n_trainable / n_total:.1f}%) prox_mu={args.prox_mu}")
     if n_trainable == 0:
         sys.exit(f"ERROR: 0 trainable parameters for client={client_name} "
                   f"with freeze={args.freeze} — refusing to train nothing.")
 
-    model.train(**train_kwargs)
+    if args.prox_mu > 0:
+        # capture the global model's weights BEFORE any local training
+        # happens — this is the fixed reference point ProxAdamW pulls
+        # each step back toward
+        global_state = {k: v.detach().clone()
+                         for k, v in model.model.state_dict().items()}
+        model.trainer = make_fedprox_trainer(args.prox_mu, global_state)
+        model.train(trainer=make_fedprox_trainer(args.prox_mu, global_state),
+                    **train_kwargs)
+    else:
+        model.train(**train_kwargs)
+
     trained = run_dir / client_name / "weights/last.pt"
     if not trained.is_file():
         sys.exit(f"ERROR: expected trained weights not found: {trained}")

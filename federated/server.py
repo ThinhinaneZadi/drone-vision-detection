@@ -122,6 +122,8 @@ def main() -> None:
                          "(match this to what your init checkpoint was "
                          "actually trained/validated at)")
     ap.add_argument("--freeze", type=int, default=0)
+    ap.add_argument("--prox-mu", type=float, default=0.0,
+                    help="FedProx proximal term strength (0 = plain FedAvg)")
     ap.add_argument("--continuous-lr", action="store_true")
     ap.add_argument("--lr0", type=float, default=0.001)
     ap.add_argument("--init", default="models/best_yolo11s_visdrone.pt")
@@ -239,7 +241,8 @@ def main() -> None:
                    "--epochs", str(rnd_epochs),
                    "--batch", str(args.batch),
                    "--imgsz", str(args.imgsz),
-                   "--freeze", str(args.freeze)]
+                   "--freeze", str(args.freeze),
+                   "--prox-mu", str(args.prox_mu)]
             if args.continuous_lr:
                 cmd += ["--continuous-lr", "--lr0", str(args.lr0)]
             rc, output = run_client_streaming(cmd)
