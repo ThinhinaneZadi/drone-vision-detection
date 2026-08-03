@@ -8,6 +8,9 @@ Features:
   for many-round schedules)
 - --epoch-schedule: vary local epochs across rounds, e.g.
   "1-35:1,36-50:2" means rounds 1-35 use 1 epoch, 36-50 use 2 epochs
+- --imgsz: evaluation/training image size (was hardcoded to 640; now
+  configurable so it can match the resolution the init checkpoint was
+  actually trained/validated at, e.g. 960)
 - --resume: continue an existing experiment from its last completed round
   (reads config.json/metrics.json, finds the last saved global checkpoint)
 - Every round: saves metrics.json (all eval results), communication_log.json,
@@ -33,9 +36,9 @@ REPO = Path(__file__).resolve().parents[1]
 CLASS_NAMES = ["pedestrian", "people", "bicycle", "car", "van", "truck",
                "tricycle", "awning-tricycle", "bus", "motor"]
 
-def evaluate(ckpt: Path, eval_yaml: Path, tag: str) -> dict:
+def evaluate(ckpt: Path, eval_yaml: Path, tag: str, imgsz: int = 640) -> dict:
     model = YOLO(str(ckpt))
-    r = model.val(data=str(eval_yaml), batch=2, imgsz=640, device="0",
+    r = model.val(data=str(eval_yaml), batch=2, imgsz=imgsz, device="0",
                   plots=False, verbose=False)
     del model
     torch.cuda.empty_cache()
@@ -51,7 +54,8 @@ def evaluate(ckpt: Path, eval_yaml: Path, tag: str) -> dict:
 def run_client_streaming(cmd: list[str]) -> tuple[int, str]:
     lines = []
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+                            stderr=subprocess.STDOUT, text=True, bufsize=1,
+                            encoding="utf-8", errors="replace")
     for line in proc.stdout:
         print(line, end="")
         lines.append(line)
@@ -113,6 +117,10 @@ def main() -> None:
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--epoch-schedule", default=None)
     ap.add_argument("--batch", type=int, default=2)
+    ap.add_argument("--imgsz", type=int, default=640,
+                    help="image size for training AND evaluation "
+                         "(match this to what your init checkpoint was "
+                         "actually trained/validated at)")
     ap.add_argument("--freeze", type=int, default=0)
     ap.add_argument("--continuous-lr", action="store_true")
     ap.add_argument("--lr0", type=float, default=0.001)
@@ -205,7 +213,7 @@ def main() -> None:
         (exp_dir / "config.json").write_text(json.dumps(config, indent=2))
         print(f"experiment: {exp_name}\nclients: "
               f"{', '.join(f'{g}({counts[g]} imgs)' for g in gids)}")
-        metrics = [evaluate(init_ckpt, eval_yaml, "initial_global")]
+        metrics = [evaluate(init_ckpt, eval_yaml, "initial_global", args.imgsz)]
 
     if not eval_yaml.is_file():
         eval_yaml.write_text(f"train: {clean_val}\nval: {clean_val}\n"
@@ -230,6 +238,7 @@ def main() -> None:
                    "--out", str(out),
                    "--epochs", str(rnd_epochs),
                    "--batch", str(args.batch),
+                   "--imgsz", str(args.imgsz),
                    "--freeze", str(args.freeze)]
             if args.continuous_lr:
                 cmd += ["--continuous-lr", "--lr0", str(args.lr0)]
@@ -251,7 +260,7 @@ def main() -> None:
         do_eval = (rnd % args.eval_every == 0) or (rnd == args.rounds)
         if do_eval:
             for g, ck in zip(gids, client_ckpts):
-                metrics.append(evaluate(ck, eval_yaml, f"round{rnd}_client_{g}"))
+                metrics.append(evaluate(ck, eval_yaml, f"round{rnd}_client_{g}", args.imgsz))
 
         states = [get_state(ck) for ck in client_ckpts]
         weights = [float(counts[g]) for g in gids]
@@ -261,7 +270,7 @@ def main() -> None:
 
         global_metric = None
         if do_eval:
-            global_metric = evaluate(new_global, eval_yaml, f"round{rnd}_global")
+            global_metric = evaluate(new_global, eval_yaml, f"round{rnd}_global", args.imgsz)
             metrics.append(global_metric)
         global_ckpt = new_global
 
@@ -286,6 +295,7 @@ def main() -> None:
             "round": rnd,
             "epochs": rnd_epochs,
             "n_clients": len(gids),
+            "imgsz": args.imgsz,
             "trainable_params": param_info["trainable"],
             "total_params": param_info["total"],
             "trainable_pct": round(param_info["trainable_pct"], 2),
