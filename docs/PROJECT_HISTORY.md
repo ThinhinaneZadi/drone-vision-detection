@@ -170,39 +170,65 @@ This project moved across many machines over time, and nearly every move surface
 
 **Consequence:** the three Part B 50-round experiments are currently being **rerun from scratch at imgsz=960** (see Section 8.1) — this is considered necessary for any results to be trustworthy or publication-ready, not optional polish.
 
-### 8.1 Current Status: Three Parallel Reruns
-
-To avoid waiting ~24+ hours running these sequentially, three separate RunPod pods were launched simultaneously (same total GPU-hour cost as sequential, much less wall-clock time):
-
-| Pod | GPU | Experiment | Settings |
-|---|---|---|---|
-| Pod 1 (`fedlearn` session) | H100 80GB | `optionB_c19_r50_imgsz960_paper` | Option B init, freeze=0, 50 rounds, batch=16, imgsz=960, epoch-schedule 1→2 at round 36 |
-| Pod 2 (`freeze11` session) | H100 80GB | `freeze11_c19_r50_imgsz960_paper` | `best_yolo11s_visdrone.pt` init, freeze=11, otherwise identical settings |
-| Pod 3 (`freeze22` session) | RTX PRO 6000 97GB | `freeze22_c19_r50_imgsz960_paper` | `best_yolo11s_visdrone.pt` init, freeze=22, otherwise identical settings |
-
-Each pod's setup was smoke-tested before the real run launched (confirming correct GPU memory usage, correct trainable-parameter counts, and real, non-empty loss values). **A new logging column, `total_steps_this_round`, was added to `server.py` to record the exact number of mini-batch training steps per round directly.** This was initially only patched locally on each pod's files individually (a repeat of the GitHub-first lesson from Section 7), but has since been properly committed to the canonical `server.py` on GitHub.
-
-**As of the writing of this document, all three pods are running and progressing normally.** Once complete, they will supersede the (resolution-flawed) Part B results in Section 6 as the project's real headline results.
-
----
-
+### 8.1 The Three Parallel Reruns — Results
+--- To avoid waiting ~24+ hours running these sequentially, three separate RunPod 
+pods were launched simultaneously (same total GPU-hour cost as sequential, much less 
+wall-clock time):
 ## 9. FedProx — An Additional Drift-Control Technique
-
-**Why:** freezing (Section 4) controls drift by physically preventing most weights from changing — effective, but blunt; it limits the model's ability to adapt at all in the frozen portion. **FedProx** (Li et al., 2020, MLSys — a real, published, well-established technique, NOT invented in this project) is a more surgical alternative: it lets every weight train normally, but adds a mathematical penalty term that discourages any single client's weights from drifting too far from the global model it started the round with.
-
-**The math:** during each client's local training, alongside the normal detection loss, an extra term is effectively added:
-Implemented as a gradient modification (mathematically equivalent to adding the term to the loss): before every real optimizer step, `mu x (current_weight - global_weight)` is added to that weight's gradient.
-
-**Implementation:** a new file `federated/fedprox.py` defines `ProxAdamW`, a subclass of PyTorch's AdamW optimizer with this gradient modification built into its `step()` method. `client_train.py` gained a `--prox-mu` flag; when set > 0, it captures the model's weights *before* training starts (the fixed reference point) and swaps in a custom Ultralytics `DetectionTrainer` subclass whose `build_optimizer()` method returns `ProxAdamW` instead of the normal optimizer.
-
-**A real bug found and fixed during development — an important lesson about Ultralytics internals:** the very first version appeared to run successfully at every tested `--prox-mu` value (0, 0.01, 1.0) but produced **bit-for-bit identical results regardless of mu** — clearly wrong, since a strong pull (mu=1.0) should visibly change training. Root cause, found via careful debug instrumentation: **Ultralytics uses gradient accumulation** — with a small batch size, it only calls the optimizer's real `.step()` once every `~64/batch_size` mini-batches, not every mini-batch. At `batch=2` with only ~60 total mini-batches in one local epoch, a client might get only **one real optimizer step** — and at that first step, the model's weights are, by definition, still identical to the global reference, so the proximal term is mathematically zero regardless of mu. This isn't a bug in the FedProx math — it's a real, previously-unknown-to-us property of how Ultralytics trains, which also means "mini-batches processed" and "actual weight updates applied" are different numbers throughout this whole project (worth stating explicitly in a paper's methods section). **Retested at `batch=16` (the project's real setting), the proximal term was confirmed working correctly** — by the second real optimizer step, the injected term was comparable in magnitude to the normal gradient itself, exactly as intended.
-
-**Status: implementation complete, debugged, and verified working. A real validation run (comparing FedProx against plain FedAvg at freeze=0, 11, and 22) has not yet been performed — it is queued behind the three Section 8.1 reruns, waiting for a free GPU.**
-
----
+| Pod | GPU | Experiment | Settings |
+**Why:** freezing (Section 4) controls drift by physically preventing most weights 
+from changing — effective, but blunt; it limits the model's ability to adapt at 
+all in the frozen portion. **FedProx** (Li et al., 2020, MLSys — a real, 
+published, well-established technique, NOT invented in this project) is a more 
+surgical alternative: it lets every weight train normally, but adds a mathematical 
+penalty term that discourages any single client's weights from drifting too far from 
+the global model it started the round with.
+|---|---|---|---|
+**The math:** during each client's local training, alongside the normal detection 
+loss, an extra term is effectively added: Implemented as a gradient modification 
+(mathematically equivalent to adding the term to the loss): before every real 
+optimizer step, `mu x (current_weight - global_weight)` is added to that weight's 
+gradient.
+| Pod 1 (`fedlearn` session) | H100 80GB | `optionB_c19_r50_imgsz960_paper` | Option 
+| B init, freeze=0, 50 rounds, batch=16, imgsz=960, epoch-schedule 1→2 at round 
+| 36 |
+**Implementation:** a new file `federated/fedprox.py` defines `ProxAdamW`, a 
+subclass of PyTorch's AdamW optimizer with this gradient modification built into its 
+`step()` method. `client_train.py` gained a `--prox-mu` flag; when set > 0, it 
+captures the model's weights *before* training starts (the fixed reference point) 
+and swaps in a custom Ultralytics `DetectionTrainer` subclass whose 
+`build_optimizer()` method returns `ProxAdamW` instead of the normal optimizer.
+| Pod 2 (`freeze11` session) | H100 80GB | `freeze11_c19_r50_imgsz960_paper` | 
+| `best_yolo11s_visdrone.pt` init, freeze=11, otherwise identical settings |
+**A real bug found and fixed during development — an important lesson about 
+Ultralytics internals:** the very first version appeared to run successfully at 
+every tested `--prox-mu` value (0, 0.01, 1.0) but produced **bit-for-bit identical 
+results regardless of mu** — clearly wrong, since a strong pull (mu=1.0) should 
+visibly change training. Root cause, found via careful debug instrumentation: 
+**Ultralytics uses gradient accumulation** — with a small batch size, it only 
+calls the optimizer's real `.step()` once every `~64/batch_size` mini-batches, not 
+every mini-batch. At `batch=2` with only ~60 total mini-batches in one local epoch, 
+a client might get only **one real optimizer step** — and at that first step, 
+the model's weights are, by definition, still identical to the global reference, so 
+the proximal term is mathematically zero regardless of mu. This isn't a bug in the 
+FedProx math — it's a real, previously-unknown-to-us property of how Ultralytics 
+trains, which also means "mini-batches processed" and "actual weight updates 
+applied" are different numbers throughout this whole project (worth stating 
+explicitly in a paper's methods section). **Retested at `batch=16` (the project's 
+real setting), the proximal term was confirmed working correctly** — by the 
+second real optimizer step, the injected term was comparable in magnitude to the 
+normal gradient itself, exactly as intended.
+| Pod 3 (`freeze22` session) | RTX PRO 6000 97GB | `freeze22_c19_r50_imgsz960_paper` 
+| | `best_yolo11s_visdrone.pt` init, freeze=22, otherwise identical settings |
+**Status: implementation complete, debugged, and verified working. A real validation 
+run (comparing FedProx against plain FedAvg at freeze=0, 11, and 22) has not yet 
+been performed — it is queued behind the three Section 8.1 reruns, waiting for a 
+free GPU.** Each pod's setup was smoke-tested before the real run launched. All 
+three completed 50 rounds. Results (final, saved permanently to GitHub, including 
+the round-50 checkpoint for each): ---
 
 ## 10. The Novel Contribution — Federated Detection Under Partial Label Spaces
-
+**freeze=11: SUCCESS.** Final round: P=0.547 R=0.446 
 This is intended to be the actual original contribution of a potential paper, not just a re-verification of existing techniques.
 
 ### 10.1 The research gap
