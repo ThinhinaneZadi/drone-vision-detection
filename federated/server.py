@@ -7,8 +7,15 @@ Features:
 - --prox-mu: FedProx proximal term strength (0 = plain FedAvg)
 - --continuous-lr: fixed small lr0, no per-round warmup restart (required
   for many-round schedules)
+- --epochs N: local epochs used EVERY round, unless --epoch-schedule is
+  also given (see below). FIXED BUG: previously, --epochs was silently
+  ignored whenever --epoch-schedule was not also passed — every round
+  trained at 1 epoch regardless of --epochs. This caused a real, costly
+  wasted overnight run. Now --epochs is correctly used as the default for
+  every round when no --epoch-schedule is given.
 - --epoch-schedule: vary local epochs across rounds, e.g.
-  "1-35:1,36-50:2" means rounds 1-35 use 1 epoch, 36-50 use 2 epochs
+  "1-35:1,36-50:2" means rounds 1-35 use 1 epoch, 36-50 use 2 epochs.
+  Overrides --epochs for the rounds it covers.
 - --imgsz: evaluation/training image size (was hardcoded to 640; now
   configurable so it can match the resolution the init checkpoint was
   actually trained/validated at, e.g. 960)
@@ -16,13 +23,16 @@ Features:
   up each client's assigned mission profile (federated/assign_label_profiles.py)
   and passes that client's specific 10-value class-weight string to
   client_train.py automatically. Requires running on a partition built by
-  build_partial_label_partition.py (e.g. tier100_partial_labels), so the
-  labels a client actually sees match the weights being applied.
+  build_partial_label_partition.py (e.g. tier100_partial_labels).
 - --resume: continue an existing experiment from its last completed round
   (reads config.json/metrics.json, finds the last saved global checkpoint)
 - Every round: saves metrics.json (all eval results), communication_log.json,
   round{N}/client_losses.json, and round_summary.csv (one row per round with
   loss + accuracy + params + communication + exact step count in one table)
+- SAFEGUARD: the resolved per-round epoch schedule is always printed loudly
+  at startup, whether or not --epoch-schedule was given, so a mismatch
+  between what you intended and what will actually run is visible
+  immediately, not discovered hours (and dollars) into a run.
 """
 
 from pathlib import Path
@@ -79,8 +89,20 @@ def parse_loss_line(output: str) -> dict:
     return {"box_loss": parse(m.group(1)), "cls_loss": parse(m.group(2)),
             "dfl_loss": parse(m.group(3))}
 
-def parse_epoch_schedule(spec: str, total_rounds: int) -> dict:
-    schedule = {r: 1 for r in range(1, total_rounds + 1)}
+def parse_epoch_schedule(spec: str, total_rounds: int, default_epochs: int = 1) -> dict:
+    """Resolve the local-epoch count for every round from 1..total_rounds.
+
+    If spec is empty/None, every round uses default_epochs (which should
+    always be args.epochs — this is the exact bug that was fixed: this
+    function used to hardcode 1 here regardless of default_epochs, which
+    silently made --epochs a no-op whenever --epoch-schedule wasn't also
+    passed).
+
+    If spec is given (e.g. "1-35:1,36-50:2"), it overrides default_epochs
+    for the rounds it covers; any round not covered by spec still falls
+    back to default_epochs.
+    """
+    schedule = {r: default_epochs for r in range(1, total_rounds + 1)}
     if not spec:
         return schedule
     for segment in spec.split(","):
@@ -122,8 +144,13 @@ def main() -> None:
     ap.add_argument("--partition", default=None)
     ap.add_argument("--clients", required=True)
     ap.add_argument("--rounds", type=int, default=1)
-    ap.add_argument("--epochs", type=int, default=1)
-    ap.add_argument("--epoch-schedule", default=None)
+    ap.add_argument("--epochs", type=int, default=1,
+                    help="local epochs used EVERY round, unless overridden "
+                         "by --epoch-schedule for specific rounds")
+    ap.add_argument("--epoch-schedule", default=None,
+                    help="e.g. '1-35:1,36-50:2' — overrides --epochs for "
+                         "the rounds it covers; rounds not covered still "
+                         "use --epochs")
     ap.add_argument("--batch", type=int, default=2)
     ap.add_argument("--imgsz", type=int, default=640,
                     help="image size for training AND evaluation "
@@ -186,11 +213,25 @@ def main() -> None:
 
     exp_name = args.exp_name or f"{part_name}_c{len(gids)}_r{args.rounds}_e{args.epochs}"
     exp_dir = REPO / "federated/experiments" / exp_name
-    epoch_sched = parse_epoch_schedule(args.epoch_schedule, args.rounds)
+
+    # epoch_sched resolution — this is the fixed logic. default_epochs is
+    # explicitly args.epochs, so --epochs is always respected for any round
+    # not specifically overridden by --epoch-schedule.
+    epoch_sched = parse_epoch_schedule(args.epoch_schedule, args.rounds, args.epochs)
+
+    # SAFEGUARD: always print the resolved schedule loudly at startup,
+    # whether or not --epoch-schedule was passed. This is what would have
+    # caught the silent --epochs-ignored bug in round 1 instead of hours
+    # (and real GPU cost) into a run.
+    unique_epoch_values = sorted(set(epoch_sched.values()))
+    print(f"RESOLVED EPOCH SCHEDULE: {len(unique_epoch_values)} distinct "
+          f"value(s) across {args.rounds} rounds -> {unique_epoch_values}")
     if args.epoch_schedule:
         for r, ep in sorted(epoch_sched.items()):
             if ep != epoch_sched.get(r - 1, ep):
                 print(f"epoch schedule: from round {r} onward, epochs={ep}")
+    else:
+        print(f"no --epoch-schedule given: every round uses --epochs={args.epochs}")
 
     eval_yaml = exp_dir / "eval.yaml"
     names_block = "\n".join(f"  {i}: {n}" for i, n in enumerate(CLASS_NAMES))
@@ -287,8 +328,6 @@ def main() -> None:
         comm_log.append({"round": rnd, "epochs": rnd_epochs,
                          "comm_bytes": comm_bytes_round})
 
-        # exact mini-batch step count this round, logged directly rather
-        # than left for the reader to recompute from batch size + image counts
         total_steps_round = sum(
             math.ceil(counts[g] / args.batch) * rnd_epochs for g in gids
         )
