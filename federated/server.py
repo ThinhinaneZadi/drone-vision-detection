@@ -5,34 +5,21 @@ sample-weighted FedAvg aggregation, and clean-global-val evaluation.
 Features:
 - --freeze N: layer freezing during local training
 - --prox-mu: FedProx proximal term strength (0 = plain FedAvg)
-- --continuous-lr: fixed small lr0, no per-round warmup restart (required
-  for many-round schedules)
-- --epochs N: local epochs used EVERY round, unless --epoch-schedule is
-  also given (see below). FIXED BUG: previously, --epochs was silently
-  ignored whenever --epoch-schedule was not also passed — every round
-  trained at 1 epoch regardless of --epochs. This caused a real, costly
-  wasted overnight run. Now --epochs is correctly used as the default for
-  every round when no --epoch-schedule is given.
-- --epoch-schedule: vary local epochs across rounds, e.g.
-  "1-35:1,36-50:2" means rounds 1-35 use 1 epoch, 36-50 use 2 epochs.
-  Overrides --epochs for the rounds it covers.
-- --imgsz: evaluation/training image size (was hardcoded to 640; now
-  configurable so it can match the resolution the init checkpoint was
-  actually trained/validated at, e.g. 960)
-- --use-profile-class-weights: for partial-label-space experiments — looks
-  up each client's assigned mission profile (federated/assign_label_profiles.py)
-  and passes that client's specific 10-value class-weight string to
-  client_train.py automatically. Requires running on a partition built by
-  build_partial_label_partition.py (e.g. tier100_partial_labels).
+- --seed: random seed passed through to every client's local training
+- --continuous-lr: fixed small lr0, no per-round warmup restart
+- --epochs / --epoch-schedule: local epoch control per round
+- --imgsz: training AND evaluation image size (match this to what your
+  init checkpoint was actually trained/validated at)
+- --use-profile-class-weights: loss-reweighting fix for partial-label-space
+  experiments (see docs/partial_label_profiles.md)
+- --use-pseudo-labeling: standard-literature comparison to the loss-
+  reweighting fix. For each client, EVERY round, regenerates that client's
+  labels by running the CURRENT global model on the client's own images
+  and adding confident predictions as pseudo-labels for classes that
+  client has no real ground truth for (see federated/pseudo_label.py).
 - --resume: continue an existing experiment from its last completed round
-  (reads config.json/metrics.json, finds the last saved global checkpoint)
-- Every round: saves metrics.json (all eval results), communication_log.json,
-  round{N}/client_losses.json, and round_summary.csv (one row per round with
-  loss + accuracy + params + communication + exact step count in one table)
-- SAFEGUARD: the resolved per-round epoch schedule is always printed loudly
-  at startup, whether or not --epoch-schedule was given, so a mismatch
-  between what you intended and what will actually run is visible
-  immediately, not discovered hours (and dollars) into a run.
+- Every round: saves metrics.json, communication_log.json,
+  round{N}/client_losses.json, and round_summary.csv
 """
 
 from pathlib import Path
@@ -90,18 +77,6 @@ def parse_loss_line(output: str) -> dict:
             "dfl_loss": parse(m.group(3))}
 
 def parse_epoch_schedule(spec: str, total_rounds: int, default_epochs: int = 1) -> dict:
-    """Resolve the local-epoch count for every round from 1..total_rounds.
-
-    If spec is empty/None, every round uses default_epochs (which should
-    always be args.epochs — this is the exact bug that was fixed: this
-    function used to hardcode 1 here regardless of default_epochs, which
-    silently made --epochs a no-op whenever --epoch-schedule wasn't also
-    passed).
-
-    If spec is given (e.g. "1-35:1,36-50:2"), it overrides default_epochs
-    for the rounds it covers; any round not covered by spec still falls
-    back to default_epochs.
-    """
     schedule = {r: default_epochs for r in range(1, total_rounds + 1)}
     if not spec:
         return schedule
@@ -144,13 +119,8 @@ def main() -> None:
     ap.add_argument("--partition", default=None)
     ap.add_argument("--clients", required=True)
     ap.add_argument("--rounds", type=int, default=1)
-    ap.add_argument("--epochs", type=int, default=1,
-                    help="local epochs used EVERY round, unless overridden "
-                         "by --epoch-schedule for specific rounds")
-    ap.add_argument("--epoch-schedule", default=None,
-                    help="e.g. '1-35:1,36-50:2' — overrides --epochs for "
-                         "the rounds it covers; rounds not covered still "
-                         "use --epochs")
+    ap.add_argument("--epochs", type=int, default=1)
+    ap.add_argument("--epoch-schedule", default=None)
     ap.add_argument("--batch", type=int, default=2)
     ap.add_argument("--imgsz", type=int, default=640,
                     help="image size for training AND evaluation "
@@ -159,17 +129,25 @@ def main() -> None:
     ap.add_argument("--freeze", type=int, default=0)
     ap.add_argument("--seed", type=int, default=0,
                     help="random seed passed through to every client's "
-                         "local training (for statistical robustness "
-                         "checks — rerun the same experiment with a "
-                         "different seed to test if results hold up)")
+                         "local training (for statistical robustness checks)")
     ap.add_argument("--prox-mu", type=float, default=0.0,
                     help="FedProx proximal term strength (0 = plain FedAvg)")
     ap.add_argument("--use-profile-class-weights", action="store_true",
-                    help="for partial-label-space experiments: look up each "
-                         "client's assigned mission profile and pass its "
-                         "specific class-weight string automatically. "
-                         "Requires a partition built by "
-                         "build_partial_label_partition.py.")
+                    help="loss-reweighting fix: look up each client's "
+                         "assigned mission profile and pass its specific "
+                         "class-weight string automatically. Requires a "
+                         "partition built by build_partial_label_partition.py.")
+    ap.add_argument("--use-pseudo-labeling", action="store_true",
+                    help="standard-literature comparison to the loss-"
+                         "reweighting fix: regenerate each client's labels "
+                         "every round using the current global model's "
+                         "confident predictions for classes that client "
+                         "has no real labels for. Requires a partition "
+                         "built by build_partial_label_partition.py.")
+    ap.add_argument("--pseudo-conf-threshold", type=float, default=0.5,
+                    help="confidence threshold for accepting a prediction "
+                         "as a pseudo-label (only used with "
+                         "--use-pseudo-labeling)")
     ap.add_argument("--continuous-lr", action="store_true")
     ap.add_argument("--lr0", type=float, default=0.001)
     ap.add_argument("--init", default="models/best_yolo11s_visdrone.pt")
@@ -181,7 +159,7 @@ def main() -> None:
 
     if args.rounds >= 10 and not args.continuous_lr:
         print(f"WARNING: {args.rounds} rounds requested without "
-              f"--continuous-lr — every round will restart LR warmup.")
+              f"--continuous-lr -- every round will restart LR warmup.")
 
     client_weight_strings = {}
     if args.use_profile_class_weights:
@@ -189,6 +167,13 @@ def main() -> None:
         client_weight_strings = get_client_weight_strings()
         print(f"profile-based class weights ENABLED for "
               f"{len(client_weight_strings)} clients")
+
+    client_profiles = {}
+    if args.use_pseudo_labeling:
+        from assign_label_profiles import assign_profiles, PROFILES
+        client_profiles = assign_profiles()
+        print(f"pseudo-labeling ENABLED for {len(client_profiles)} clients "
+              f"(conf_threshold={args.pseudo_conf_threshold})")
 
     part_name = args.partition or f"tier{args.tier}"
     part_root = REPO / f"federated/experiments/partitions/{part_name}"
@@ -215,19 +200,14 @@ def main() -> None:
         if args.use_profile_class_weights and g not in client_weight_strings:
             sys.exit(f"ERROR: --use-profile-class-weights set but no profile "
                      f"assignment found for client {g}")
+        if args.use_pseudo_labeling and g not in client_profiles:
+            sys.exit(f"ERROR: --use-pseudo-labeling set but no profile "
+                     f"assignment found for client {g}")
 
     exp_name = args.exp_name or f"{part_name}_c{len(gids)}_r{args.rounds}_e{args.epochs}"
     exp_dir = REPO / "federated/experiments" / exp_name
 
-    # epoch_sched resolution — this is the fixed logic. default_epochs is
-    # explicitly args.epochs, so --epochs is always respected for any round
-    # not specifically overridden by --epoch-schedule.
     epoch_sched = parse_epoch_schedule(args.epoch_schedule, args.rounds, args.epochs)
-
-    # SAFEGUARD: always print the resolved schedule loudly at startup,
-    # whether or not --epoch-schedule was passed. This is what would have
-    # caught the silent --epochs-ignored bug in round 1 instead of hours
-    # (and real GPU cost) into a run.
     unique_epoch_values = sorted(set(epoch_sched.values()))
     print(f"RESOLVED EPOCH SCHEDULE: {len(unique_epoch_values)} distinct "
           f"value(s) across {args.rounds} rounds -> {unique_epoch_values}")
@@ -282,7 +262,8 @@ def main() -> None:
                                "sample_counts": {g: counts[g] for g in gids},
                                "param_info": param_info,
                                "epoch_schedule_resolved": epoch_sched,
-                               "client_weight_strings": client_weight_strings}
+                               "client_weight_strings": client_weight_strings,
+                               "client_profiles": client_profiles}
         (exp_dir / "config.json").write_text(json.dumps(config, indent=2))
         print(f"experiment: {exp_name}\nclients: "
               f"{', '.join(f'{g}({counts[g]} imgs)' for g in gids)}")
@@ -305,8 +286,35 @@ def main() -> None:
             print(f"\n--- round {rnd}/{args.rounds} (epochs={rnd_epochs}): "
                   f"training client_{g} ({counts[g]} images) ---")
             t0 = time.time()
+
+            client_data_yaml = part_root / f"client_{g}" / "data.yaml"
+
+            if args.use_pseudo_labeling:
+                from pseudo_label import generate_pseudo_labeled_partition
+                from assign_label_profiles import PROFILES
+                allowed = set(PROFILES[client_profiles[g]])
+                pseudo_dir = rdir / f"pseudo_client_{g}"
+                train_txt, n_pseudo = generate_pseudo_labeled_partition(
+                    model_ckpt=global_ckpt,
+                    source_client_dir=part_root / f"client_{g}",
+                    allowed_classes=allowed,
+                    out_dir=pseudo_dir,
+                    conf_threshold=args.pseudo_conf_threshold,
+                    imgsz=args.imgsz,
+                    device="0",
+                )
+                print(f"pseudo-labeling client_{g}: {n_pseudo} pseudo-label "
+                      f"instances added for classes outside its profile")
+                pseudo_data_yaml = pseudo_dir / "data.yaml"
+                pseudo_data_yaml.write_text(
+                    f"train: {train_txt}\nval: {clean_val}\n"
+                    f"names:\n{names_block}\n"
+                )
+                client_data_yaml = pseudo_data_yaml
+                torch.cuda.empty_cache()
+
             cmd = [sys.executable, str(REPO / "federated/client_train.py"),
-                   "--data", str(part_root / f"client_{g}" / "data.yaml"),
+                   "--data", str(client_data_yaml),
                    "--init", str(global_ckpt),
                    "--out", str(out),
                    "--epochs", str(rnd_epochs),
@@ -315,7 +323,6 @@ def main() -> None:
                    "--freeze", str(args.freeze),
                    "--prox-mu", str(args.prox_mu),
                    "--seed", str(args.seed)]
-
             if args.use_profile_class_weights:
                 cmd += ["--class-weights", client_weight_strings[g]]
             if args.continuous_lr:
