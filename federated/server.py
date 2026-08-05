@@ -157,6 +157,12 @@ def main() -> None:
                          "(match this to what your init checkpoint was "
                          "actually trained/validated at)")
     ap.add_argument("--freeze", type=int, default=0)
+    ap.add_argument("--freeze", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=0,
+                    help="random seed passed through to every client's "
+                         "local training (for statistical robustness "
+                         "checks — rerun the same experiment with a "
+                         "different seed to test if results hold up)")
     ap.add_argument("--prox-mu", type=float, default=0.0,
                     help="FedProx proximal term strength (0 = plain FedAvg)")
     ap.add_argument("--use-profile-class-weights", action="store_true",
@@ -308,7 +314,9 @@ def main() -> None:
                    "--batch", str(args.batch),
                    "--imgsz", str(args.imgsz),
                    "--freeze", str(args.freeze),
-                   "--prox-mu", str(args.prox_mu)]
+                   "--prox-mu", str(args.prox_mu),
+                   "--seed", str(args.seed)]
+
             if args.use_profile_class_weights:
                 cmd += ["--class-weights", client_weight_strings[g]]
             if args.continuous_lr:
