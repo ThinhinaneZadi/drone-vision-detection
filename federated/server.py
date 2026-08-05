@@ -157,7 +157,6 @@ def main() -> None:
                          "(match this to what your init checkpoint was "
                          "actually trained/validated at)")
     ap.add_argument("--freeze", type=int, default=0)
-    ap.add_argument("--freeze", type=int, default=0)
     ap.add_argument("--seed", type=int, default=0,
                     help="random seed passed through to every client's "
                          "local training (for statistical robustness "
