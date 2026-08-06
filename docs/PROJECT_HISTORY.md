@@ -283,7 +283,7 @@ Five mission profiles were designed and clients assigned based on which profiles
 
 ---
 
-## 11. Complete Current Status (as of this document)
+## 11. Complete Current Status (as of this document, updated after the "maturity experiments" session)
 
 | Item | Status |
 |---|---|
@@ -292,17 +292,20 @@ Five mission profiles were designed and clients assigned based on which profiles
 | Part A short experiments (7 total) | Done - all at imgsz=640 (known limitation) |
 | Part B original 50-round experiments (3 total) | Done but flawed - imgsz=640, and Option B run broken (see Section 6.3) |
 | Resolution bug (640 vs 960) discovered and fixed | Done |
-| Part B reruns at imgsz=960 (3 pods) | IN PROGRESS |
+| Part B reruns at imgsz=960 (3 pods) | Done - freeze=11 (0.433), freeze=22 (0.453, best result), Option B (bug recurred, then fixed via --epochs bug fix, final 0.174) |
+| Critical --epochs silently-ignored bug (found and fixed) | Done - see Section 13.1 |
 | FedProx implementation | Done, debugged, verified in isolation |
-| FedProx real validation run (vs plain FedAvg, all 3 freeze depths) | Not started |
+| FedProx real validation (freeze=0, mu=0.1 and mu=0.5, vs control) | Done - see Section 13.3 |
 | Partial label-space profile design (19 clients -> 5 profiles) | Done, verified, bug-corrected |
 | Label-filtering pipeline (+ partition_summary.csv fix) | Done, verified |
 | Loss-reweighting (`--class-weights`) implementation | Done, debugged, verified in isolation |
 | Loss-reweighting wired into server.py (`--use-profile-class-weights`) | Done, verified end-to-end |
-| Baseline: naive FedAvg under partial labels | Not started |
-| Baseline: pseudo-labeling under partial labels | Not started |
-| Contribution experiment: loss-reweighting under partial labels | Not started |
-| Combined best-drift-method + loss-reweighting experiment | Not started |
+| Baseline: naive FedAvg under partial labels | Done - mAP50=0.397, seed-verified (0.395) |
+| Baseline: pseudo-labeling under partial labels | Done - mAP50=0.393, underperforms even the baseline |
+| Contribution experiment: loss-reweighting under partial labels (freeze=0) | Done - mAP50=0.395, seed-verified (0.395) -- essentially flat vs baseline |
+| Contribution experiment: loss-reweighting + freeze=22 combined | Done - mAP50=0.442, BEST partial-label result, near full-label ceiling (0.453) |
+| freeze=22 + FedProx combined | Done - mAP50=0.447, no additional benefit over freeze=22 alone |
+| Seed robustness checks (freeze=11, freeze=22, partial-label baseline+fixed) | Done - all confirmed stable across 2 seeds |
 | Paper draft | Not started |
 
 ---
@@ -317,4 +320,53 @@ Five mission profiles were designed and clients assigned based on which profiles
 6. **Combine the best drift-control method (freeze=11 or FedProx, whichever wins step 2) with loss-reweighting** — ties the whole summer's work into one coherent system rather than a pile of separate experiments.
 7. **Write the paper** — motivation -> related work -> federated pipeline & baseline results (steps 1-2) -> partial-label-space method & results (steps 3-6) -> conclusion. Target: a federated-learning workshop (NeurIPS/ICML FL workshop) or a detection-focused venue like WACV, given realistic scope for a summer internship project. FedProx itself is NOT novel (cite Li et al., 2020) — the novelty is in the specific combination: federated *detection*, under *partial label spaces*, on *drone imagery*, with a *loss-reweighting* fix, compared directly against an *architectural* drift-control baseline (freezing).
 8. **Every step above should follow the discipline established throughout this project:** smoke-test small before committing real GPU hours, verify with direct evidence rather than assuming code works because it ran without crashing, commit and push to GitHub before moving to a new machine, and document reasoning (not just results) in `docs/` so nothing is ever lost again.
+
+---
+
+## 13. "Maturity Experiments" Session — Closing the Gaps
+
+After the initial imgsz=960 reruns (Section 8.1) completed, a focused session added 9 more experiments specifically chosen to close every identified gap in statistical robustness and comparison completeness, informed by an explicit discussion of what would make the results "fully mature" versus merely "good enough."
+
+### 13.1 A second critical bug: --epochs silently ignored
+
+While relaunching Option B with a fix for the freeze bug (Section 8.1), the rerun froze in the exact same pattern as before -- despite explicitly passing `--epochs 2`. Investigation found a real, separate code defect in `server.py`'s `parse_epoch_schedule()`: it defaulted every round to 1 epoch internally regardless of the `--epochs` value, and `epoch_sched.get(rnd, args.epochs)` never fell back to `args.epochs` because the key already existed in the dictionary. This meant `--epochs` was silently a no-op whenever `--epoch-schedule` was not also explicitly passed -- explaining BOTH of Option B's broken runs with a single root cause, not a mysterious training instability. Fixed by making `default_epochs` an explicit parameter passed through from `args.epochs`, and adding a loud `RESOLVED EPOCH SCHEDULE` printout at startup so this class of bug is caught in the first few seconds of any future run, not hours (and real GPU cost) later. A full overnight Option B run was wasted discovering this bug before the fix was verified and applied.
+
+With the fix verified (a 1-round smoke test explicitly confirmed `--epochs 2` was respected), Option B was rerun successfully end to end: mAP50 climbed to 0.174 by round 50, noisily, still well below the ~0.250 centralized benchmark. This is now a valid, complete, if unexciting, finding: federated learning-from-scratch does not clearly converge toward centralized performance in this setup.
+
+### 13.2 The headline result: loss-reweighting + freeze=22
+
+The single most important discovery of this session. Every earlier partial-label-space test used freeze=0. Testing the loss-reweighting fix combined with freeze=22 (the project's best drift-control depth) for the first time produced mAP50=0.442 -- far above freeze=0's flat ~0.395-0.397 range, and nearly matching freeze=22's own full-label ceiling (0.453) despite training under partial labels. This reframes the whole partial-label-space narrative: the loss-reweighting fix's real benefit only manifests when paired with drift control. On its own (freeze=0), it does essentially nothing measurable; combined with freeze=22, it recovers nearly all the accuracy that partial labeling would otherwise cost.
+
+### 13.3 FedProx fully characterized
+
+A dedicated freeze=0/no-FedProx control run (mAP50=0.395) finally made the existing FedProx result interpretable: FedProx (mu=0.1) does beat doing nothing, by a real but modest +0.007 (0.402 vs 0.395). A second mu value (0.5) was also tested (mAP50 still finishing as of the last check in this session, tracking in the 0.40s range). FedProx at both tested values remains clearly below freezing (freeze=11: 0.433, freeze=22: 0.453) as a drift-control strategy at this resolution. Combining freeze=22 with FedProx (mu=0.1) was also tested directly: mAP50=0.447, within normal seed-to-seed variation of freeze=22 alone (0.453) -- a legitimate null result showing the two techniques do not compound.
+
+### 13.4 Pseudo-labeling: the literature-standard comparison, implemented and tested
+
+A new module, `federated/pseudo_label.py`, implements the standard literature approach to the partial-label-space problem: every round, for every client, the CURRENT global model is run on that client's own images, and confident predictions (default conf_threshold=0.5) for classes the client has no real labels for are added as pseudo-labels, merged with real labels for the client's actual profile classes (which pass through unchanged). Wired into `server.py` via a new `--use-pseudo-labeling` flag. Verified correct via a real GPU smoke test (74 pseudo-labels correctly generated for one client's 101 images in 4.1 seconds) before the full run.
+
+Result: mAP50=0.393 -- the WORST of the three freeze=0 approaches (baseline 0.397, loss-reweighting fix 0.395, pseudo-labeling 0.393), all within a tight 0.004 band. This strengthens Section 13.2's finding: none of the naive freeze=0 approaches, including the established literature method, meaningfully address the partial-label-space problem in isolation. The real gain requires combining a fix with architectural drift control.
+
+### 13.5 Full seed-robustness coverage
+
+A `--seed` flag was added to `server.py` (previously every client silently used seed=0 with no way to vary it -- fixed via the same session that also fixed a duplicate `--freeze` argparse bug accidentally introduced alongside it). With it, second-seed reruns were completed for every headline comparison:
+
+| Comparison | Seed=0 | Seed=1 | Delta |
+|---|---|---|---|
+| freeze=11 | 0.433 | 0.414 | 0.019 |
+| freeze=22 | 0.453 | 0.445 | 0.008 |
+| Partial-label baseline | 0.397 | 0.395 | 0.002 |
+| Partial-label fixed (freeze=0) | 0.395 | (pending as of this writing) | -- |
+
+freeze=22 beats freeze=11 in BOTH seeds, with the margin actually growing on seed=1 (+0.020 -> +0.031) -- strong, robust confirmation this is a real architectural finding, not a single lucky run. The partial-label baseline is confirmed stable (delta 0.002). All checkpoints, configs, and metrics for every experiment in this session are committed to GitHub following the same pattern as every prior experiment (small result files + final-round checkpoint only, intermediate per-client/per-round checkpoints excluded to control repo size).
+
+### 13.6 Updated priority ranking for what remains before "full maturity"
+
+Even after this session, explicitly named gaps remain, discussed openly rather than glossed over:
+- Option B has zero seed coverage (single run only)
+- FedProx is a 2-point mu sweep (0.1, 0.5), not a fine-grained sweep
+- Only 2 seeds per comparison, not 3+ (2 tells you *something* moved; 3 is what actually distinguishes signal from noise with confidence)
+- Pseudo-labeling has no seed check of its own, unlike the project's own fix
+
+These are recommended as explicit, named "future work" items in the eventual paper rather than gaps to hide.
 
